@@ -1,0 +1,70 @@
+"use client";
+
+import { useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
+
+interface UnlockFormProps {
+  userId: string;
+  currentLocked: number;
+  onUpdate: (newLockedAmount: number) => void;
+}
+
+export default function UnlockForm({ userId, currentLocked, onUpdate }: UnlockFormProps) {
+  const [amount, setAmount] = useState<number>(0);
+  const [message, setMessage] = useState<string>("");
+
+  const handleUnlock = async () => {
+    if (amount > currentLocked) {
+      setMessage("Cannot unlock more than locked amount.");
+      return;
+    }
+
+    try {
+      const { error: txnError } = await supabase.from("transactions").insert({
+        user_id: userId,
+        amount,
+        type: "unlock",
+      });
+
+      if (txnError) throw txnError;
+
+      setMessage(`$${amount.toFixed(2)} has been unlocked.`);
+
+      setAmount(0); // reset input
+
+      const { data: savingsData, error: savingsError } = await supabase
+        .from("savings")
+        .select("locked_amount")
+        .eq("user_id", userId)
+        .single();
+
+      if (savingsError && savingsError.code !== "PGRST116") throw savingsError;
+
+      const newLocked = savingsData ? Number(savingsData.locked_amount) : 0;
+      onUpdate(newLocked);
+    } catch (err) {
+      console.error("Error in handleUnlock:", err);
+      setMessage("Failed to unlock savings. Check console.");
+    }
+  };
+
+  return (
+    <div>
+      <h3 className="text-lg font-semibold mb-4">Unlock Savings</h3>
+      <input
+        type="number"
+        className="border p-2 rounded w-full mb-4"
+        value={amount || ""}
+        onChange={(e) => setAmount(parseFloat(e.target.value))}
+        placeholder="Enter amount"
+      />
+      <button
+        onClick={handleUnlock}
+        className="bg-green-600 text-white py-2 px-4 rounded"
+      >
+        Unlock Savings
+      </button>
+      {message && <p className="mt-2 text-green-600">{message}</p>}
+    </div>
+  );
+}

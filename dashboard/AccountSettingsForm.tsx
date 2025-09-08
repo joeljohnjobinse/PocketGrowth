@@ -8,15 +8,14 @@ interface Props {
   onUpdate: () => void;
 }
 
-export default function AddAllowanceForm({ userId, onUpdate }: Props) {
-  const [amount, setAmount] = useState<string>(""); // Changed to string to avoid NaN
-  const [message, setMessage] = useState<string>("");
+export default function AccountSettingsForm({ userId, onUpdate }: Props) {
   const [savingsPercent, setSavingsPercent] = useState<number>(20);
-  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [message, setMessage] = useState<string>("");
+  const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  // Fetch user's preferred savings percent
   const fetchSavingsPercent = async () => {
     try {
+      setIsLoading(true);
       const { data, error } = await supabase
         .from("user_settings")
         .select("savings_percent")
@@ -25,181 +24,140 @@ export default function AddAllowanceForm({ userId, onUpdate }: Props) {
 
       if (error) {
         if (error.code === "PGRST116") {
-          // No settings found, use default
-          console.log("No custom savings settings, using default 20%");
+          // No record found, use default
+          console.log("No settings found, using default 20%");
           return;
         }
-        console.error("Error fetching savings percent:", error);
-        return;
+        console.error("Fetch error:", error);
+        throw error;
       }
 
       if (data?.savings_percent) {
-        console.log("Using savings percent:", data.savings_percent);
+        console.log("Loaded savings percent:", data.savings_percent);
         setSavingsPercent(data.savings_percent);
       }
-    } catch (err) {
-      console.error("Error in fetchSavingsPercent:", err);
+    } catch (err: any) {
+      console.error("Error fetching savings percent:", err);
+      setMessage("Failed to load savings settings.");
+    } finally {
+      setIsLoading(false);
     }
   };
 
   useEffect(() => {
     if (userId) {
       fetchSavingsPercent();
-
-      // Set up real-time subscription
-      const channel = supabase
-        .channel('user_settings_changes')
-        .on(
-          'postgres_changes',
-          {
-            event: 'UPDATE',
-            schema: 'public',
-            table: 'user_settings',
-            filter: `id=eq.${userId}`
-          },
-          (payload) => {
-            console.log('Settings updated:', payload);
-            if (payload.new && 'savings_percent' in payload.new) {
-              const newPercent = payload.new.savings_percent as number;
-              console.log('Updating to new percent:', newPercent);
-              setSavingsPercent(newPercent);
-            }
-          }
-        )
-        .on(
-          'postgres_changes',
-          {
-            event: 'INSERT',
-            schema: 'public',
-            table: 'user_settings',
-            filter: `id=eq.${userId}`
-          },
-          (payload) => {
-            console.log('Settings inserted:', payload);
-            if (payload.new && 'savings_percent' in payload.new) {
-              const newPercent = payload.new.savings_percent as number;
-              console.log('Setting new percent:', newPercent);
-              setSavingsPercent(newPercent);
-            }
-          }
-        )
-        .subscribe();
-
-      return () => {
-        supabase.removeChannel(channel);
-      };
     }
   }, [userId]);
 
-  const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const value = e.target.value;
-    // Allow only numbers and decimal point
-    if (value === "" || /^\d*\.?\d*$/.test(value)) {
-      setAmount(value);
-    }
-  };
-
-  const getNumericAmount = (): number => {
-    if (amount === "" || amount === ".") return 0;
-    return parseFloat(amount) || 0;
-  };
-
-  const handleAddAllowance = async () => {
-    const numericAmount = getNumericAmount();
-    if (numericAmount <= 0) {
-      setMessage("Please enter a valid amount.");
-      return;
-    }
-
-    setIsLoading(true);
-    setMessage("");
-
+  const handleUpdate = async () => {
     try {
-      // Insert transaction
-      const { error: txnError } = await supabase.from("transactions").insert({
-        user_id: userId,
-        amount: numericAmount,
-        type: "allowance",
-      });
+      setMessage("");
+      setIsLoading(true);
 
-      if (txnError) throw txnError;
+      // Use upsert to handle both insert and update
+      const { error } = await supabase
+        .from("user_settings")
+        .upsert(
+          { 
+            id: userId, 
+            savings_percent: savingsPercent,
+            updated_at: new Date().toISOString()
+          },
+          {
+            onConflict: 'id',
+            ignoreDuplicates: false
+          }
+        );
 
-      // Calculate savings amount
-      const savingsAmount = numericAmount * (savingsPercent / 100);
-
-      // Update or create savings record
-      const { data: existingSavings, error: savingsError } = await supabase
-        .from("savings")
-        .select("locked_amount")
-        .eq("user_id", userId)
-        .single();
-
-      if (savingsError && savingsError.code !== "PGRST116") throw savingsError;
-
-      const currentLocked = existingSavings ? Number(existingSavings.locked_amount) : 0;
-      const newLocked = currentLocked + savingsAmount;
-
-      if (existingSavings) {
-        const { error: updateError } = await supabase
-          .from("savings")
-          .update({ locked_amount: newLocked })
-          .eq("user_id", userId);
-        if (updateError) throw updateError;
-      } else {
-        const { error: insertError } = await supabase
-          .from("savings")
-          .insert({ user_id: userId, locked_amount: newLocked });
-        if (insertError) throw insertError;
+      if (error) {
+        console.error("Upsert error:", error);
+        throw error;
       }
 
-      setMessage(`✅ $${numericAmount.toFixed(2)} added! $${savingsAmount.toFixed(2)} (${savingsPercent}%) saved automatically.`);
-      setAmount("");
+      setMessage(`✅ Savings preference updated to ${savingsPercent}%`);
       onUpdate();
+      
+      setTimeout(() => setMessage(""), 3000);
     } catch (err: any) {
-      console.error("Error adding allowance:", err);
-      setMessage("Error adding allowance. Please try again.");
+      console.error("Error updating savings percent:", err);
+      
+      let errorMessage = "Failed to update savings preference.";
+      
+      if (err.code === "42501") {
+        errorMessage = "Permission denied. Please check RLS policies in Supabase.";
+      } else if (err.message) {
+        errorMessage = `Error: ${err.message}`;
+      }
+      
+      setMessage(errorMessage);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const numericAmount = getNumericAmount();
-  const calculatedSavings = numericAmount > 0 ? (numericAmount * (savingsPercent / 100)).toFixed(2) : "0.00";
-  const displayAmount = amount === "" ? "0" : numericAmount.toFixed(2);
+  if (isLoading) {
+    return (
+      <div className="bg-white rounded-2xl shadow-lg p-6">
+        <h3 className="text-lg font-semibold mb-4 text-black">Account Settings</h3>
+        <div className="animate-pulse">
+          <div className="h-4 bg-gray-200 rounded w-1/3 mb-4"></div>
+          <div className="h-2 bg-gray-200 rounded w-full mb-6"></div>
+          <div className="h-10 bg-gray-200 rounded w-full"></div>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="bg-white rounded-2xl shadow-lg p-6">
-      <h3 className="text-lg font-semibold mb-4 text-black">Add Allowance</h3>
-
-      <input
-        type="text" // Changed to text to have better control
-        inputMode="decimal" // Shows numeric keyboard on mobile
-        value={amount}
-        onChange={handleAmountChange}
-        className="w-full border border-gray-300 rounded-lg px-4 py-2 mb-4 text-black focus:outline-none focus:ring-2 focus:ring-blue-500"
-        placeholder="Enter amount"
-      />
-
-      <div className="mb-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
-        <p className="text-sm text-blue-800 font-medium">
-          Savings Rate: <span className="text-green-600">{savingsPercent}%</span>
-        </p>
-        <p className="text-sm text-blue-800 mt-1">
-          Amount to save: <span className="font-bold">${calculatedSavings}</span>
-        </p>
-        <p className="text-xs text-blue-600 mt-2">
-          Change savings percentage in Account Settings
+    <div className="bg-white rounded-2xl shadow-lg p-6 hover:shadow-xl transition-shadow duration-300">
+      <h3 className="text-lg font-semibold mb-4 text-black">Savings Settings</h3>
+      
+      <div className="mb-6">
+        <label className="block text-sm font-medium text-gray-700 mb-3">
+          Savings Percentage: <span className="font-bold text-green-600">{savingsPercent}%</span>
+        </label>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={savingsPercent}
+          onChange={(e) => setSavingsPercent(parseInt(e.target.value))}
+          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer slider"
+          style={{
+            background: `linear-gradient(to right, #10b981 0%, #10b981 ${savingsPercent}%, #e5e7eb ${savingsPercent}%, #e5e7eb 100%)`
+          }}
+        />
+        <div className="flex justify-between text-xs text-gray-500 mt-1">
+          <span>0%</span>
+          <span>25%</span>
+          <span>50%</span>
+          <span>75%</span>
+          <span>100%</span>
+        </div>
+        <p className="text-sm text-gray-600 mt-2">
+          {savingsPercent}% of your allowance will be automatically saved.
         </p>
       </div>
 
       <button
-        onClick={handleAddAllowance}
-        disabled={isLoading || numericAmount <= 0}
-        className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white font-medium py-3 px-4 rounded-lg transition-colors duration-200"
+        onClick={handleUpdate}
+        disabled={isLoading}
+        className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white font-medium py-3 px-4 rounded-lg transition-colors duration-200 flex items-center justify-center"
       >
-        {isLoading ? "Processing..." : `Add $${displayAmount}`}
+        {isLoading ? (
+          <>
+            <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Updating...
+          </>
+        ) : (
+          "Save Preference"
+        )}
       </button>
-
+      
       {message && (
         <p className={`mt-3 text-sm ${
           message.includes("✅") ? "text-green-600" : "text-red-600"
